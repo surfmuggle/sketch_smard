@@ -1,0 +1,206 @@
+package smard
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+)
+
+const (
+	baseURL = "https://www.smard.de/app/chart_data"
+	defaultTimeout = 60 * time.Second
+)
+
+// Client represents a SMARD API client
+type Client struct {
+	httpClient *http.Client
+	baseURL    string
+}
+
+// NewClient creates a new SMARD API client
+func NewClient() *Client {
+	return &Client{
+		httpClient: &http.Client{
+			Timeout: defaultTimeout,
+		},
+		c.baseURL: c.baseURL,
+	}
+}
+
+// NewClientWithHTTP creates a new SMARD API client with a custom HTTP client
+func NewClientWithHTTP(httpClient *http.Client) *Client {
+	return &Client{
+		httpClient: httpClient,
+		c.baseURL:    c.baseURL,
+	}
+}
+
+// NewClientWithOptions creates a new SMARD API client with custom options
+func NewClientWithOptions(httpClient *http.Client, baseURL string) *Client {
+	return &Client{
+		httpClient: httpClient,
+		c.baseURL:    c.baseURL,
+	}
+}
+
+// GetTimestamps retrieves available timestamps for the given filter, region, and resolution
+func (c *Client) GetTimestamps(ctx context.Context, filter Filter, region Region, resolution Resolution) ([]int64, error) {
+	if err := ValidateParameters(filter, region, resolution); err != nil {
+		return nil, fmt.Errorf("parameter validation failed: %w", err)
+	}
+	
+	url := fmt.Sprintf("%s/%s/%s/index_%s.json", c.c.baseURL, filter, region, resolution)
+	
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d for URL %s", resp.StatusCode, url)
+	}
+
+	var result TimestampResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return result.Timestamps, nil
+}
+
+// GetTimeseries retrieves time series data for the given parameters
+func (c *Client) GetTimeseries(ctx context.Context, filter Filter, region Region, resolution Resolution, timestamp int64) (*ParsedTimeseries, error) {
+	if err := ValidateParameters(filter, region, resolution); err != nil {
+		return nil, fmt.Errorf("parameter validation failed: %w", err)
+	}
+	
+	if timestamp <= 0 {
+		return nil, fmt.Errorf("timestamp must be positive, got %d", timestamp)
+	}
+	
+	url := fmt.Sprintf("%s/%s/%s/%s_%s_%s_%d.json", c.baseURL, filter, region, filter, region, resolution, timestamp)
+	
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d for URL %s", resp.StatusCode, url)
+	}
+
+	var result TimeseriesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return parseTimeseries(result), nil
+}
+
+// GetTimeseriesRaw retrieves raw time series data without parsing timestamps
+func (c *Client) GetTimeseriesRaw(ctx context.Context, filter Filter, region Region, resolution Resolution, timestamp int64) (*TimeseriesResponse, error) {
+	if err := ValidateParameters(filter, region, resolution); err != nil {
+		return nil, fmt.Errorf("parameter validation failed: %w", err)
+	}
+	
+	if timestamp <= 0 {
+		return nil, fmt.Errorf("timestamp must be positive, got %d", timestamp)
+	}
+	
+	url := fmt.Sprintf("%s/%s/%s/%s_%s_%s_%d.json", c.baseURL, filter, region, filter, region, resolution, timestamp)
+	
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d for URL %s", resp.StatusCode, url)
+	}
+
+	var result TimeseriesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// GetLatestTimestamp is a convenience method to get the most recent timestamp
+func (c *Client) GetLatestTimestamp(ctx context.Context, filter Filter, region Region, resolution Resolution) (int64, error) {
+	if err := ValidateParameters(filter, region, resolution); err != nil {
+		return 0, fmt.Errorf("parameter validation failed: %w", err)
+	}
+	
+	timestamps, err := c.GetTimestamps(ctx, filter, region, resolution)
+	if err != nil {
+		return 0, err
+	}
+	
+	if len(timestamps) == 0 {
+		return 0, fmt.Errorf("no timestamps available")
+	}
+	
+	// Find the maximum timestamp
+	latest := timestamps[0]
+	for _, ts := range timestamps[1:] {
+		if ts > latest {
+			latest = ts
+		}
+	}
+	
+	return latest, nil
+}
+
+// parseTimeseries converts the raw API response to properly typed Go data
+func parseTimeseries(response TimeseriesResponse) *ParsedTimeseries {
+	data := make([]TimeseriesData, len(response.Series))
+	
+	for i, point := range response.Series {
+		// Extract timestamp (should be float64 from JSON)
+		timestampFloat, ok := point[0].(float64)
+		if !ok {
+			// Skip invalid data points
+			continue
+		}
+		
+		timestamp := time.Unix(int64(timestampFloat)/1000, (int64(timestampFloat)%1000)*1000000)
+		
+		// Extract value (can be float64 or nil)
+		var value *float64
+		if point[1] != nil {
+			if valueFloat, ok := point[1].(float64); ok {
+				value = &valueFloat
+			}
+		}
+		
+		data[i] = TimeseriesData{
+			Timestamp: timestamp,
+			Value:     value,
+		}
+	}
+	
+	return &ParsedTimeseries{
+		Data: data,
+	}
+}
